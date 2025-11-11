@@ -1,5 +1,9 @@
 """
-Скрипт для предварительной аугментации и подготовки объединенного набора данных.
+Скрипт для предварительной аугментации обучающего набора данных.
+
+Аугментация применяется только к обучающей выборке (`train`), чтобы
+валидационная (`valid`) и тестовая (`test`) выборки остались "чистыми"
+для объективной оценки производительности модели.
 
 Гибридный подход (Финальная версия):
 - Сочетает надежность ручного изгиба с удобством Albumentations
@@ -271,10 +275,14 @@ def main():
         shutil.rmtree(OUTPUT_DATA_DIR)
     shutil.copytree(INPUT_DATA_DIR, OUTPUT_DATA_DIR)
     
-    # Обработка каждого split
-    for split in ["train", "valid", "test"]:
+    # --- ИЗМЕНЕНИЕ: Обрабатываем только 'train' ---
+    # Аугментация применяется только к обучающей выборке.
+    splits_to_process = ["train"] 
+    
+    for split in splits_to_process:
         split_path = OUTPUT_DATA_DIR / split
         if not split_path.exists():
+            print(f"Предупреждение: директория {split} не найдена. Пропускаем.")
             continue
         
         img_dir = split_path / "images"

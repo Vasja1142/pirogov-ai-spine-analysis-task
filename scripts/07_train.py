@@ -9,15 +9,15 @@ model = YOLO("yolo12n.pt")
 results = model.train(
     # --- Основные параметры ---
     data="data.yaml",
-    epochs=30,
+    epochs=25,
     imgsz=640,
     batch=64,
     project="data/05_runs",
-    name="spine_yolo12n_final",
+    name="spine_yolo12n_final2",
     exist_ok=True,  # Разрешаем перезапись, если папка уже существует
     
     # --- Включаем и настраиваем аугментации ---
-    iou=0.50,          # IoU для определения положительных примеров
+    iou=0.40,          # IoU для определения положительных примеров
     conf=0.10,        # Порог уверенности для отбора предсказаний
     augment=True,      # Главный переключатель аугментаций
     mosaic=1.0,        # Включить мозаику (очень рекомендуется)
@@ -37,8 +37,8 @@ results = model.train(
     hsv_s=0.7,
     hsv_v=0.4,
 
-    dfl=1.15,
-    cls=0.55,
+    dfl=1.1,
+    cls=0.6,
     box=5.0,
 
     
