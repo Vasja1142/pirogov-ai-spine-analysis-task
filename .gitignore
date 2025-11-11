@@ -6,6 +6,18 @@ __pycache__/
 # C extensions
 *.so
 
+*.pt
+# Игнорировать всё в папке data
+data/*
+
+# Сделать исключения для родительских папок, чтобы добраться до нужной
+!data/05_runs/
+# Игнорировать всё остальное в 05_runs
+data/05_runs/*
+
+# Исключить из игнора финальную папку с результатами
+!data/05_runs/spine_yolo12n_final/
+
 # Distribution / packaging
 .Python
 build/
