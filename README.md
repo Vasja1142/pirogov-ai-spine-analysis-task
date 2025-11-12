@@ -182,9 +182,6 @@ pirogov-ai-spine-analysis/
 │   ├── 06_visual_analyzer.py     # GUI для подбора гиперпараметров
 │   └── 07_train_yolo12n.py       # Обучение модели
 │
-├── 
-│
-├──
 ├── data.yaml                     # Конфигурация датасета для YOLO
 ├── DOMAIN_ANALYSIS.md            # Анализ медицинской предметной области
 ├── TEST_TASK.md                  # Формулировка задания   
@@ -354,4 +351,4 @@ yolo predict model=data/05_runs/spine_yolo12n_final/weights/best.pt source=path/
 
 - **Язык программирования:** Python
 - **Основные библиотеки:** PyTorch, OpenCV, Albumentations, NumPy, Pandas
-- **Инструменты:** Git, Jupyter, Tkinter
+- **Инструменты:** Git, Tkinter
