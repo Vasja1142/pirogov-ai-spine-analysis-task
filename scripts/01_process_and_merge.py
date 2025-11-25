@@ -1,15 +1,11 @@
 """
-Скрипт для обработки, унификации классов и объединения наборов данных.
+Скрипт для обработки и объединения наборов данных СЕГМЕНТАЦИИ.
 
-Этапы обработки:
-1. Определяет глобальный канонический список классов для всего проекта
-2. Создает структуру каталогов в `data/02_processed`
-3. Для каждого набора данных в `data/01_raw`:
-   - Находит локальный `data.yaml` и читает список классов
-   - Создает карту преобразования из локальных ID в глобальные
-   - Обрабатывает файлы меток, заменяя локальные ID на глобальные
-   - Выполняет обрезку изображений и корректировку координат
-4. Сохраняет обработанные файлы в `data/02_processed` с префиксами
+Изменения:
+- Источник данных: data/01_raw/segmentation
+- Специфичная логика: Если датасет == 'Scoliosis.v2i.yolov12', 
+  выполняется обрезка изображения сверху (над самым верхним позвонком).
+- Для остальных датасетов изображение остается оригинальным.
 """
 
 import shutil
@@ -25,9 +21,11 @@ from tqdm import tqdm
 # КОНФИГУРАЦИЯ
 # ============================================================================
 
-INPUT_DATA_ROOT = Path("data/01_raw")
-UNIFIED_OUTPUT_ROOT = Path("data/02_processed2")
-CROP_MARGIN = 0.01  # Дополнительный отступ при обрезке изображений
+INPUT_DATA_ROOT = Path("data/01_raw/segmentation")
+UNIFIED_OUTPUT_ROOT = Path("data/02_processed")
+
+# Насколько выше самого верхнего позвонка резать (в процентах от высоты)
+CROP_MARGIN = 0.02 
 
 # Глобальный список классов 
 GLOBAL_CLASSES = [
@@ -44,38 +42,13 @@ GLOBAL_CLASS_MAP = {name: i for i, name in enumerate(GLOBAL_CLASSES)}
 # ============================================================================
 
 def get_image_files(path: Path) -> list[Path]:
-    """Получает список всех изображений в директории."""
     return sorted([
         p for p in path.glob("*")
         if p.suffix.lower() in [".jpg", ".jpeg", ".png"]
     ])
 
-
-def convert_polygon_to_bbox(
-    polygon: np.ndarray,
-    img_width: int,
-    img_height: int
-) -> tuple:
-    """Конвертирует полигональную аннотацию в bounding box формата YOLO."""
-    polygon[:, 0] *= img_width
-    polygon[:, 1] *= img_height
-    
-    x_min, y_min = np.min(polygon, axis=0)
-    x_max, y_max = np.max(polygon, axis=0)
-    
-    box_width = x_max - x_min
-    box_height = y_max - y_min
-    
-    center_x = (x_min + box_width / 2) / img_width
-    center_y = (y_min + box_height / 2) / img_height
-    
-    return center_x, center_y, box_width / img_width, box_height / img_height
-
-
 def create_class_remapping(local_yaml_path: Path) -> dict:
-    """Создает словарь для преобразования локальных ID классов в глобальные."""
     if not local_yaml_path.exists():
-        print(f"Warning: {local_yaml_path} not found. Cannot remap classes.")
         return None
     
     with open(local_yaml_path, 'r') as f:
@@ -85,16 +58,15 @@ def create_class_remapping(local_yaml_path: Path) -> dict:
     remapping = {}
     
     for local_id, name in enumerate(local_classes):
-        name_upper = name.upper()
-        
-        if name_upper in GLOBAL_CLASS_MAP:
-            remapping[local_id] = GLOBAL_CLASS_MAP[name_upper]
+        clean_name = name.strip().upper()
+        if clean_name in GLOBAL_CLASS_MAP:
+            remapping[local_id] = GLOBAL_CLASS_MAP[clean_name]
         else:
-            print(
-                f"Warning: Class '{name}' from {local_yaml_path.parent.name} "
-                f"not in GLOBAL_CLASSES. It will be ignored."
-            )
-    
+            # Поиск при неточном совпадении
+            for g_name in GLOBAL_CLASSES:
+                if g_name == clean_name:
+                    remapping[local_id] = GLOBAL_CLASS_MAP[g_name]
+                    break
     return remapping
 
 
@@ -103,134 +75,136 @@ def process_and_merge_split(
     split_name: str,
     dest_img_dir: Path,
     dest_label_dir: Path,
-    should_crop: bool,
-    class_remapping: dict
+    class_remapping: dict,
+    should_crop: bool
 ):
-    """Обрабатывает и объединяет один split из исходного датасета."""
+    """Обрабатывает один split."""
     dataset_name = source_dataset_dir.name
-    print(f"--- Processing split: {dataset_name}/{split_name} ---")
+    
+    # Поиск папки (train/val/valid)
+    source_split_dir = source_dataset_dir / split_name
+    if not source_split_dir.exists():
+        if split_name == "valid":
+            source_split_dir = source_dataset_dir / "val"
+            if not source_split_dir.exists():
+                return
+        else:
+            return
 
-    source_img_dir = source_dataset_dir / split_name / "images"
-    source_label_dir = source_dataset_dir / split_name / "labels"
+    print(f"--- Processing: {dataset_name}/{split_name} (Crop: {should_crop}) ---")
+
+    source_img_dir = source_split_dir / "images"
+    source_label_dir = source_split_dir / "labels"
 
     image_paths = get_image_files(source_img_dir)
-    if not image_paths:
-        return
 
-    for img_path in tqdm(image_paths, desc=f"Processing {dataset_name}/{split_name}"):
+    for img_path in tqdm(image_paths, desc=f"{dataset_name}"):
         label_path = source_label_dir / f"{img_path.stem}.txt"
         if not label_path.exists():
             continue
 
         image = cv2.imread(str(img_path))
-        if image is None:
-            continue
+        if image is None: continue
         
-        img_height, img_width, _ = image.shape
-
-        # Чтение и парсинг аннотаций
+        orig_h, orig_w = image.shape[:2]
+        
         lines = label_path.read_text().strip().split('\n')
-        if not lines or not lines[0]:
-            continue
+        if not lines or not lines[0]: continue
 
-        bboxes_data = []
-        highest_y = img_height
+        # 1. Парсим полигоны
+        polygons = [] # List of (global_id, [coords...])
+        all_y_coords = [] # Для поиска верхней точки
 
         for line in lines:
             parts = line.split()
-            local_class_id = int(parts[0])
+            try:
+                local_id = int(parts[0])
+            except ValueError: continue
             
-            # Пропускаем класс, если его нет в глобальной карте
-            if local_class_id not in class_remapping:
-                continue
+            if local_id not in class_remapping: continue
             
-            global_class_id = class_remapping[local_class_id]
-            coords = np.array([float(c) for c in parts[1:]])
-
-            # Определяем тип аннотации
-            is_segmentation = len(coords) > 4
+            global_id = class_remapping[local_id]
+            coords = [float(x) for x in parts[1:]]
             
-            if is_segmentation:
-                polygon = coords.reshape(-1, 2)
-                bbox = convert_polygon_to_bbox(polygon.copy(), img_width, img_height)
-                current_highest_y = np.min(polygon[:, 1] * img_height)
-            else:
-                center_x, center_y, box_width, box_height = coords
-                bbox = (center_x, center_y, box_width, box_height)
-                current_highest_y = (center_y - box_height / 2) * img_height
-
-            if current_highest_y < highest_y:
-                highest_y = current_highest_y
+            if len(coords) < 6: continue # Минимум 3 точки
             
-            bboxes_data.append((global_class_id, bbox))
-
-        # Обрезка изображения при необходимости
-        crop_y = 0
-        new_img_height = img_height
-        processed_image = image
-
-        if should_crop:
-            crop_y = max(0, int(highest_y - (img_height * CROP_MARGIN)))
-            processed_image = image[crop_y:img_height, :]
-            new_img_height, _, _ = processed_image.shape
+            polygons.append((global_id, coords))
             
-            if new_img_height == 0:
-                continue
+            # Собираем Y координаты (они на нечетных позициях 1, 3, 5...)
+            # coords = [x1, y1, x2, y2, ...]
+            ys = coords[1::2]
+            all_y_coords.extend(ys)
 
-        # Корректировка координат bbox после обрезки
-        new_labels = []
+        if not polygons: continue
+
+        # 2. Вычисляем обрезку
+        crop_y_offset = 0
+        new_h = orig_h
+
+        if should_crop and all_y_coords:
+            # Находим самый верхний пиксель (минимальный Y)
+            min_y_norm = min(all_y_coords)
+            min_y_abs = min_y_norm * orig_h
+            
+            # Отступаем вверх на margin
+            crop_pos = int(min_y_abs - (orig_h * CROP_MARGIN))
+            crop_y_offset = max(0, crop_pos)
+            
+            # Если отрезать нечего (позвонок и так в самом верху), offset будет 0
+            if crop_y_offset > 0:
+                image = image[crop_y_offset:, :]
+                new_h = image.shape[0]
+                if new_h == 0: continue # Защита
+
+        # 3. Пересчитываем координаты меток
+        final_labels = []
         
-        for global_class_id, (center_x, center_y, box_width, box_height) in bboxes_data:
-            if should_crop:
-                abs_y_center = center_y * img_height
-                abs_y_height = box_height * img_height
-                abs_y_min = abs_y_center - (abs_y_height / 2)
-                abs_y_max = abs_y_center + (abs_y_height / 2)
-
-                new_abs_y_min = max(0, abs_y_min - crop_y)
-                new_abs_y_max = min(new_img_height, abs_y_max - crop_y)
-
-                if new_abs_y_max <= new_abs_y_min:
-                    continue
-
-                new_abs_height = new_abs_y_max - new_abs_y_min
-                new_abs_center_y = new_abs_y_min + (new_abs_height / 2)
+        for global_id, coords in polygons:
+            new_coords = []
+            # Итерируемся парами (x, y)
+            for i in range(0, len(coords), 2):
+                x_norm = coords[i]
+                y_norm = coords[i+1]
                 
-                final_center_y = new_abs_center_y / new_img_height
-                final_box_height = new_abs_height / new_img_height
-                
-                if final_box_height > 1e-4:
-                    new_labels.append(
-                        f"{global_class_id} {center_x} {final_center_y} "
-                        f"{box_width} {final_box_height}"
-                    )
-            else:
-                new_labels.append(
-                    f"{global_class_id} {center_x} {center_y} "
-                    f"{box_width} {box_height}"
-                )
-
-        # Сохранение результатов
-        if new_labels:
-            new_img_name = f"{dataset_name}_{img_path.name}"
-            new_label_name = f"{dataset_name}_{img_path.stem}.txt"
+                if should_crop and crop_y_offset > 0:
+                    # Денормализация Y
+                    y_abs = y_norm * orig_h
+                    # Сдвиг
+                    new_y_abs = y_abs - crop_y_offset
+                    # Нормализация к НОВОЙ высоте
+                    new_y_norm = new_y_abs / new_h
+                    
+                    # Клиппинг (чтобы не вылезло за пределы картинки)
+                    new_y_norm = max(0.0, min(1.0, new_y_norm))
+                    
+                    # X не меняется, так как ширину не резали
+                    # Но на всякий случай клиппинг
+                    x_norm = max(0.0, min(1.0, x_norm))
+                    
+                    new_coords.extend([x_norm, new_y_norm])
+                else:
+                    new_coords.extend([x_norm, y_norm])
             
-            cv2.imwrite(str(dest_img_dir / new_img_name), processed_image)
-            (dest_label_dir / new_label_name).write_text('\n'.join(new_labels))
+            # Формируем строку
+            coords_str = " ".join([f"{c:.6f}" for c in new_coords])
+            final_labels.append(f"{global_id} {coords_str}")
+
+        # 4. Сохранение
+        new_img_name = f"{dataset_name}_{img_path.name}"
+        new_label_name = f"{dataset_name}_{img_path.stem}.txt"
+        
+        cv2.imwrite(str(dest_img_dir / new_img_name), image)
+        (dest_label_dir / new_label_name).write_text('\n'.join(final_labels))
 
 
 # ============================================================================
-# ОСНОВНАЯ ФУНКЦИЯ
+# MAIN
 # ============================================================================
 
 def main():
-    """Главная функция для запуска обработки и объединения датасетов."""
-    
-    # Очистка и создание выходной директории
     if UNIFIED_OUTPUT_ROOT.exists():
         shutil.rmtree(UNIFIED_OUTPUT_ROOT)
     
-    # Создание структуры директорий
     unified_train_images = UNIFIED_OUTPUT_ROOT / "train" / "images"
     unified_train_labels = UNIFIED_OUTPUT_ROOT / "train" / "labels"
     unified_test_images = UNIFIED_OUTPUT_ROOT / "test" / "images"
@@ -242,44 +216,37 @@ def main():
     ]:
         path.mkdir(parents=True)
 
-    # Обработка каждого датасета
+    if not INPUT_DATA_ROOT.exists():
+        print(f"Error: {INPUT_DATA_ROOT} not found!")
+        return
+
     for dataset_dir in INPUT_DATA_ROOT.iterdir():
-        if not dataset_dir.is_dir():
-            continue
+        if not dataset_dir.is_dir(): continue
         
         dataset_name = dataset_dir.name
-        print(f"\n{'='*60}")
-        print(f"Processing dataset: {dataset_name}")
-        print(f"{'='*60}")
+        print(f"\nProcessing dataset: {dataset_name}")
 
-        # Создание карты преобразования классов
         class_remapping = create_class_remapping(dataset_dir / "data.yaml")
-        if not class_remapping:
-            print(f"Skipping {dataset_name} due to missing class mapping.")
-            continue
+        if not class_remapping: continue
 
-        # Определение необходимости обрезки
-        should_crop = not (
-            "cervica" in dataset_name.lower() or
-            "cervical" in dataset_name.lower()
-        )
-        print(f"Cropping enabled: {should_crop}")
-
-        # Обработка train и valid splits
+        # --- ЛОГИКА ВКЛЮЧЕНИЯ ОБРЕЗКИ ---
+        # Включаем только для конкретного датасета
+        should_crop = (dataset_name == "Scoliosis.v2i.yolov12")
+        
         process_and_merge_split(
             dataset_dir, "train",
             unified_train_images, unified_train_labels,
-            should_crop, class_remapping
+            class_remapping, should_crop
         )
         
         process_and_merge_split(
             dataset_dir, "valid",
             unified_test_images, unified_test_labels,
-            should_crop, class_remapping
+            class_remapping, should_crop
         )
 
     print("\n" + "="*60)
-    print("Script finished successfully!")
+    print("Done. Cropping applied only to Scoliosis dataset.")
     print("="*60)
 
 
