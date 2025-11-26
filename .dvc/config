@@ -1,4 +1,3 @@
-[core]
-    remote = myremote
-['remote "myremote"']
-    url = gdrive://1u2NgqaUlGT3_byKhr-9ttwt6rG2dOJvR
+['remote "origin"']
+    url = s3://dvc
+    endpointurl = https://dagshub.com/vasja11420/pirogov-ai-spine-analysis-task.s3
