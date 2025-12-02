@@ -25,9 +25,11 @@ from typing import Set
 # ⚙️ КОНФИГУРАЦИЯ ОБРАБОТКИ
 # ============================================================================
 
+
 @dataclass
 class SimpleProcessingConfig:
     """Параметры для упрощенного пайплайна нормализации."""
+
     # 1. Bilateral Filter
     bilat_d: int = 3
     bilat_sigma_color: int = 75
@@ -40,9 +42,11 @@ class SimpleProcessingConfig:
     sharpen_sigma: float = 5.0
     sharpen_amount: float = 0.5
 
+
 # ============================================================================
 # 🛠 ПАЙПЛАЙН ОБРАБОТКИ
 # ============================================================================
+
 
 def apply_simple_pipeline(
     image: np.ndarray, config: SimpleProcessingConfig
@@ -63,9 +67,7 @@ def apply_simple_pipeline(
         return process_channel(image, config)
 
 
-def process_channel(
-    channel: np.ndarray, config: SimpleProcessingConfig
-) -> np.ndarray:
+def process_channel(channel: np.ndarray, config: SimpleProcessingConfig) -> np.ndarray:
     """
     Применяет полный набор фильтров к одному каналу изображения.
 
@@ -97,7 +99,7 @@ def robust_auto_levels(channel: np.ndarray, cutoff: float) -> np.ndarray:
     high_val = np.percentile(channel_float, 100 - cutoff)
 
     if high_val <= low_val:
-        return channel # Избегаем деления на ноль
+        return channel  # Избегаем деления на ноль
 
     clipped = np.clip(channel_float, low_val, high_val)
     normalized = (clipped - low_val) / (high_val - low_val) * 255.0
@@ -109,9 +111,11 @@ def unsharp_mask(channel: np.ndarray, sigma: float, amount: float) -> np.ndarray
     gaussian = cv2.GaussianBlur(channel, (0, 0), sigma)
     return cv2.addWeighted(channel, 1.0 + amount, gaussian, -amount, 0)
 
+
 # ============================================================================
 # 🚀 ЗАПУСК
 # ============================================================================
+
 
 def main():
     """Главная функция для парсинга аргументов и запуска обработки."""
@@ -119,12 +123,16 @@ def main():
         description="Упрощенный скрипт нормализации изображений (Bilateral -> Levels -> Sharpen)."
     )
     parser.add_argument(
-        "--input", type=Path, default=Path("data/03_augmented"),
-        help="Путь к входной директории с данными."
+        "--input",
+        type=Path,
+        default=Path("data/03_augmented"),
+        help="Путь к входной директории с данными.",
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("data/04_normalized"),
-        help="Путь к выходной директории для сохранения результатов."
+        "--output",
+        type=Path,
+        default=Path("data/04_normalized"),
+        help="Путь к выходной директории для сохранения результатов.",
     )
     args = parser.parse_args()
 
@@ -148,7 +156,7 @@ def main():
             shutil.copy2(txt_file, output_txt_path)
 
     # Поиск изображений для обработки
-    image_extensions: Set[str] = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+    image_extensions: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
     all_images = [p for ext in image_extensions for p in args.input.rglob(f"*{ext}")]
 
     if not all_images:
@@ -174,6 +182,7 @@ def main():
         cv2.imwrite(str(output_img_path), processed_img)
 
     print(f"\n✅ Обработка завершена. Результаты сохранены в: {args.output}")
+
 
 if __name__ == "__main__":
     main()
