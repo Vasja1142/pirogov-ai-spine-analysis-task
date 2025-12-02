@@ -1,154 +1,203 @@
 """
-Скрипт предобработки данных v2.0 (на основе параметров Tuner).
-Включает: Bilateral Filter, CLAHE, Gamma, Sharpening, Z-Score Normalization.
+Универсальный скрипт для предобработки (нормализации) изображений.
+
+Поддерживает два режима работы:
+1.  `dataset`: Обрабатывает структурированный набор данных в формате YOLO
+    (например, `train/images`, `train/labels`). Метки (`.txt`) копируются
+    без изменений.
+2.  `flat`: Рекурсивно обрабатывает все изображения в указанной директории,
+    сохраняя структуру подпапок. Метки игнорируются.
+
+Пример использования:
+- Для набора данных YOLO:
+  `python 04_normalize_data.py --mode dataset --input data/01_raw --output data/02_normalized`
+- Для папки с изображениями:
+  `python 04_normalize_data.py --mode flat --input /path/to/images --output /path/to/output`
 """
 
+import argparse
 import shutil
 from pathlib import Path
+from dataclasses import dataclass
 import cv2
 import numpy as np
 from tqdm import tqdm
+from typing import List
 
-# ============================================================================
-# ⚙️ КОНФИГУРАЦИЯ (ВСЕ НАСТРОЙКИ СО СКРИНШОТА)
-# ============================================================================
+# ============================================================================ 
+# ⚙️ КОНФИГУРАЦИЯ ОБРАБОТКИ
+# ============================================================================ 
 
-INPUT_DATA_DIR = Path("data/03_augmented")
-OUTPUT_DATA_DIR = Path("data/04_normalized")
+@dataclass
+class ProcessingConfig:
+    """Параметры для пайплайна нормализации изображений."""
+    # Bilateral Filter (удаление шума с сохранением краев)
+    use_bilateral: bool = True
+    bilateral_d: int = 5
+    bilateral_sigma_color: int = 100
+    bilateral_sigma_space: int = 80
 
-# 1. Шум и Детали
-USE_BILATERAL = True                # Включено на скрине
-BILATERAL_D = 5                     # Diameter
-BILATERAL_SIGMA_COLOR = 100         # Sigma Color
-BILATERAL_SIGMA_SPACE = 80          # Sigma Space
+    # Median Blur (альтернативное удаление шума)
+    use_median: bool = False
+    median_ksize: int = 3
 
-USE_MEDIAN = False                  # Снята галочка на скрине
-MEDIAN_KSIZE = 3
+    # CLAHE (локальное выравнивание гистограммы для повышения контраста)
+    clahe_clip_limit: float = 3.0
+    clahe_grid_size: tuple[int, int] = (32, 32)
 
-# 2. Контраст и Яркость
-CLAHE_CLIP_LIMIT = 3.0             # Со скрина
-CLAHE_GRID_SIZE = (32, 32)          # Со скрина
+    # Gamma Correction (коррекция яркости)
+    use_gamma: bool = True
+    gamma_value: float = 1.60
 
-USE_GAMMA = True
-GAMMA_VALUE = 2.00                  # 206 со слайдера = 2.06 (темнее/контрастнее)
+    # Sharpening (повышение резкости)
+    use_sharpen: bool = True
+    sharpen_alpha: float = 0.40
 
-# 3. Резкость (Sharpen)
-USE_SHARPEN = True
-SHARPEN_ALPHA = 0.60                # Со скрина
-
-# ============================================================================
+# ============================================================================ 
 # 🛠 ПАЙПЛАЙН ОБРАБОТКИ
-# ============================================================================
+# ============================================================================ 
 
-def apply_normalization_pipeline(image: np.ndarray, clahe_processor) -> np.ndarray:
-    processed_image = image.copy()
+def apply_normalization_pipeline(
+    image: np.ndarray, config: ProcessingConfig, clahe_processor: cv2.CLAHE
+) -> np.ndarray:
+    """
+    Применяет к изображению последовательность фильтров для нормализации.
+    """
+    processed = image.copy()
 
-    # 1. Bilateral Filter (Сглаживание с сохранением краев)
-    if USE_BILATERAL:
-        processed_image = cv2.bilateralFilter(
-            processed_image, 
-            d=BILATERAL_D, 
-            sigmaColor=BILATERAL_SIGMA_COLOR, 
-            sigmaSpace=BILATERAL_SIGMA_SPACE
+    if config.use_bilateral:
+        processed = cv2.bilateralFilter(
+            processed, config.bilateral_d, config.bilateral_sigma_color, config.bilateral_sigma_space
+        )
+    if config.use_median:
+        processed = cv2.medianBlur(processed, config.median_ksize)
+
+    processed = clahe_processor.apply(processed)
+
+    if config.use_gamma:
+        table = np.array(
+            [((i / 255.0) ** config.gamma_value) * 255 for i in np.arange(256)]
+        ).astype("uint8")
+        processed = cv2.LUT(processed, table)
+
+    if config.use_sharpen:
+        gaussian = cv2.GaussianBlur(processed, (0, 0), 3.0)
+        processed = cv2.addWeighted(
+            processed, 1.0 + config.sharpen_alpha, gaussian, -config.sharpen_alpha, 0
         )
 
-    # 2. Median Blur (если нужен)
-    if USE_MEDIAN:
-        processed_image = cv2.medianBlur(processed_image, MEDIAN_KSIZE)
-
-    # 3. CLAHE (Локальный контраст)
-    processed_image = clahe_processor.apply(processed_image)
-
-    # 4. Gamma Correction
-    # Формула: O = (I / 255) ^ gamma * 255
-    if USE_GAMMA:
-        # Создаем таблицу поиска (LUT) для скорости
-        inv_gamma = GAMMA_VALUE # Albumentations использует значение напрямую как степень
-        table = np.array([
-            ((i / 255.0) ** inv_gamma) * 255
-            for i in np.arange(0, 256)
-        ]).astype("uint8")
-        processed_image = cv2.LUT(processed_image, table)
-
-    # 5. Sharpening (Повышение резкости)
-    # Метод Unsharp Mask: Original + (Original - Blurred) * Amount
-    if USE_SHARPEN:
-        gaussian = cv2.GaussianBlur(processed_image, (0, 0), 3.0)
-        processed_image = cv2.addWeighted(processed_image, 1.0 + SHARPEN_ALPHA, gaussian, -SHARPEN_ALPHA, 0)
-
-    # 6. Z-Score Нормализация (Стандартизация)
-    # Приводим к нулевому среднему и единичному отклонению, затем обратно в 0-255
-    # Это помогает нейросети лучше сходиться.
-    processed_image = processed_image.astype("float32")
-    mean, std = cv2.meanStdDev(processed_image)
-    
+    # Z-Score нормализация и масштабирование до 0-255
+    processed_float = processed.astype(np.float32)
+    mean, std = cv2.meanStdDev(processed_float)
     if std[0, 0] > 1e-6:
-        processed_image = (processed_image - mean[0, 0]) / std[0, 0]
-    
-    # Масштабируем обратно в 0-255 для сохранения в файл
-    processed_image = cv2.normalize(
-        processed_image, None, 0, 255, cv2.NORM_MINMAX
-    ).astype("uint8")
+        processed_float = (processed_float - mean[0, 0]) / std[0, 0]
 
-    return processed_image
+    return cv2.normalize(
+        processed_float, None, 0, 255, cv2.NORM_MINMAX
+    ).astype(np.uint8)
 
+# ============================================================================ 
+# 📂 ЛОГИКА РАБОТЫ С ФАЙЛАМИ
+# ============================================================================ 
 
-# ============================================================================
-# 🚀 ЗАПУСК
-# ============================================================================
-
-def main():
-    if not INPUT_DATA_DIR.exists():
-        print(f"❌ Ошибка: Папка {INPUT_DATA_DIR} не найдена.")
+def process_single_file(
+    img_path: Path, output_dir: Path, config: ProcessingConfig, clahe: cv2.CLAHE
+):
+    """Читает, обрабатывает и сохраняет одно изображение."""
+    image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        print(f"  [Предупреждение] Не удалось прочитать: {img_path.name}")
         return
 
-    if OUTPUT_DATA_DIR.exists():
-        shutil.rmtree(OUTPUT_DATA_DIR)
-    
-    print(f"🚀 Начинаю обработку данных в: {OUTPUT_DATA_DIR}")
-    print(f"⚙️ Параметры: Bilateral={USE_BILATERAL}, CLAHE={CLAHE_CLIP_LIMIT}, Gamma={GAMMA_VALUE}, Sharpen={SHARPEN_ALPHA}")
+    normalized_image = apply_normalization_pipeline(image, config, clahe)
+    output_path = output_dir / f"{img_path.stem}.png"
+    cv2.imwrite(str(output_path), normalized_image)
 
-    # Инициализация CLAHE один раз
-    clahe = cv2.createCLAHE(
-        clipLimit=CLAHE_CLIP_LIMIT,
-        tileGridSize=CLAHE_GRID_SIZE
-    )
-
+def process_dataset_mode(
+    input_dir: Path, output_dir: Path, config: ProcessingConfig, clahe: cv2.CLAHE
+):
+    """Обрабатывает набор данных в формате YOLO (train/valid/test)."""
+    print(f"🔹 Режим: Dataset. Обработка {input_dir.name}...")
     for split in ["train", "valid", "test"]:
-        input_split_dir = INPUT_DATA_DIR / split
-        if not input_split_dir.exists(): continue
-        
-        print(f"📂 Обработка папки '{split}'...")
-        
-        input_img_dir = input_split_dir / "images"
-        input_label_dir = input_split_dir / "labels"
-        output_img_dir = OUTPUT_DATA_DIR / split / "images"
-        output_label_dir = OUTPUT_DATA_DIR / split / "labels"
-        
+        input_img_dir = input_dir / "images" / split
+        input_label_dir = input_dir / "labels" / split
+
+        if not input_img_dir.is_dir(): # Проверяем существование директории с изображениями
+            continue
+
+        print(f"  📂 Обработка набора '{split}'...")
+        output_img_dir = output_dir / "images" / split
+        output_label_dir = output_dir / "labels" / split
+
         output_img_dir.mkdir(parents=True, exist_ok=True)
         output_label_dir.mkdir(parents=True, exist_ok=True)
 
+        if input_label_dir.is_dir():
+            shutil.copytree(input_label_dir, output_label_dir, dirs_exist_ok=True)
+
         image_paths = sorted(list(input_img_dir.glob("*.jpg")) + list(input_img_dir.glob("*.png")))
+        for img_path in tqdm(image_paths, desc=f"  -> {split}"):
+            process_single_file(img_path, output_img_dir, config, clahe)
 
-        for img_path in tqdm(image_paths):
-            # Читаем картинку (сразу в оттенках серого)
-            image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-            if image is None: continue
-            
-            # Применяем весь пайплайн
-            normalized_image = apply_normalization_pipeline(image, clahe)
-            
-            # Сохраняем всегда в PNG (чтобы не терять качество на сжатии JPG)
-            output_path = output_img_dir / f"{img_path.stem}.png"
-            cv2.imwrite(str(output_path), normalized_image)
-            
-            # Просто копируем метки (они не меняются от изменения цвета/яркости)
-            label_path = input_label_dir / f"{img_path.stem}.txt"
-            if label_path.exists():
-                shutil.copy2(label_path, output_label_dir)
+def process_flat_mode(
+    input_dir: Path, output_dir: Path, config: ProcessingConfig, clahe: cv2.CLAHE
+):
+    """Рекурсивно обрабатывает все изображения в директории."""
+    print(f"🔹 Режим: Flat. Рекурсивная обработка {input_dir}...")
+    extensions = ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif"]
+    image_paths = [p for ext in extensions for p in input_dir.rglob(ext)]
 
-    print("\n✅ Обработка завершена успешно.")
+    if not image_paths:
+        print(f"⚠️ Изображения не найдены в {input_dir}")
+        return
 
+    for img_path in tqdm(image_paths, desc="  -> Изображения"):
+        relative_path = img_path.relative_to(input_dir)
+        save_dir = output_dir / relative_path.parent
+        save_dir.mkdir(parents=True, exist_ok=True)
+        process_single_file(img_path, save_dir, config, clahe)
+
+# ============================================================================ 
+# 🚀 ЗАПУСК
+# ============================================================================ 
+
+def main():
+    """Главная функция для парсинга аргументов и запуска обработки."""
+    parser = argparse.ArgumentParser(description="Скрипт нормализации изображений.")
+    parser.add_argument(
+        "--mode", type=str, required=True, choices=["dataset", "flat"],
+        help="Режим работы: 'dataset' для YOLO-структуры, 'flat' для папки с картинками."
+    )
+    parser.add_argument(
+        "--input", type=Path, required=True, help="Путь к входной директории."
+    )
+    parser.add_argument(
+        "--output", type=Path, required=True, help="Путь к выходной директории."
+    )
+    args = parser.parse_args()
+
+    if not args.input.exists():
+        print(f"❌ Ошибка: Входная директория не найдена: {args.input}")
+        return
+
+    if args.output.exists():
+        shutil.rmtree(args.output)
+    args.output.mkdir(parents=True)
+
+    config = ProcessingConfig()
+    clahe = cv2.createCLAHE(
+        clipLimit=config.clahe_clip_limit, tileGridSize=config.clahe_grid_size
+    )
+
+    print(f"🚀 Старт обработки: {args.input} -> {args.output}")
+    print(f"⚙️ Конфигурация: CLAHE={config.clahe_clip_limit}, Gamma={config.gamma_value}, Sharpen={config.sharpen_alpha}")
+
+    if args.mode == "dataset":
+        process_dataset_mode(args.input, args.output, config, clahe)
+    elif args.mode == "flat":
+        process_flat_mode(args.input, args.output, config, clahe)
+
+    print("\n✅ Обработка завершена.")
 
 if __name__ == "__main__":
     main()
